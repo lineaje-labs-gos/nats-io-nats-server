@@ -175,7 +175,6 @@ type raftGroup struct {
 type desiredRaftGroup struct {
 	ID        string   `json:"id"`
 	Leader    string   `json:"leader,omitempty"`
-	Name      string   `json:"name"`
 	Peers     []string `json:"peers"`
 	Cluster   string   `json:"cluster,omitempty"`
 	Preferred string   `json:"preferred,omitempty"`
@@ -206,10 +205,10 @@ func (rg *raftGroup) withDesired(target *raftGroup) *raftGroup {
 		leader = target.Desired.Leader
 	}
 	ng := rg.copyGroup()
+	ng.Name = target.Name
 	ng.Desired = &desiredRaftGroup{
 		ID:        nuid.Next(),
 		Leader:    leader,
-		Name:      target.Name,
 		Peers:     target.Peers,
 		Cluster:   target.Cluster,
 		Preferred: target.Preferred,
@@ -11046,8 +11045,7 @@ func (js *jetStream) clusterInfo(rg *raftGroup) *ClusterInfo {
 	)
 	if d := rg.Desired; d != nil {
 		desired = &DesiredClusterInfo{
-			Name:      d.Cluster,
-			RaftGroup: d.Name,
+			Name: d.Cluster,
 		}
 		// If desired state can be rolled back, include what can be rolled back to.
 		if d.Rollback != nil {
