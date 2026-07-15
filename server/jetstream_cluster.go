@@ -7827,6 +7827,11 @@ func (js *jetStream) reconcileDesiredStreamAssignment(_ *subscription, _ *client
 	if ng != nil {
 		sa := osa.copyGroup()
 		sa.Group = ng
+		// Single nodes are not recorded by the NRG layer so we can rename.
+		// MUST do this, otherwise a scaleup afterward could potentially lead to inconsistencies.
+		if sa.Group.Desired == nil && len(sa.Group.Peers) == 1 {
+			sa.Group.Name = groupNameForStream(sa.Group.Peers, sa.Group.Storage)
+		}
 		if err := cc.meta.Propose(encodeUpdateStreamAssignment(sa)); err != nil {
 			return
 		}
@@ -7887,6 +7892,11 @@ func (js *jetStream) reconcileDesiredConsumerAssignment(_ *subscription, _ *clie
 	}
 	ca := oca.copyGroup()
 	ca.Group = ng
+	// Single nodes are not recorded by the NRG layer so we can rename.
+	// MUST do this, otherwise a scaleup afterward could potentially lead to inconsistencies.
+	if ca.Group.Desired == nil && len(ca.Group.Peers) == 1 {
+		ca.Group.Name = groupNameForConsumer(ca.Group.Peers, ca.Group.Storage)
+	}
 	if err := cc.meta.Propose(encodeAddConsumerAssignment(ca)); err != nil {
 		return
 	}
@@ -8289,6 +8299,10 @@ func (js *jetStream) remapConsumerAssignments(accName string, sa *streamAssignme
 		}
 		// Assign new peers.
 		cca.Group.Peers = newPeers
+		// Single nodes are not recorded by the NRG layer so we can rename.
+		if len(ca.Group.Peers) == 1 && ca.Group.Desired == nil {
+			cca.Group.Name = groupNameForConsumer(cca.Group.Peers, cca.Group.Storage)
+		}
 		// If the replicas was not 0 make sure it matches here.
 		if cca.Config.Replicas != 0 {
 			// Copy the config before mutating it, since only the assignment was copied.
@@ -9105,7 +9119,7 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 				return
 			}
 			// Single nodes are not recorded by the NRG layer so we can rename.
-			if len(peers) == 1 || osa.Config.Replicas == 1 {
+			if len(osa.Group.Peers) == 1 && osa.Group.Desired == nil {
 				rg.Name = groupNameForStream(peers, rg.Storage)
 			}
 			if len(currentPeers) == 1 {
@@ -9126,8 +9140,8 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 		rg.Preferred = _EMPTY_
 	}
 
-	if isRetentionChange {
-		// FIXME(mvv): skip desired state if changing an R1 without desired state
+	// A retention change should go through desired state, unless it is a singleton without desired state.
+	if isRetentionChange && !(rg.Desired == nil && len(rg.Peers) == 1) {
 		// Must always register desired state.
 		if rg.Desired == nil {
 			rg = osa.Group.withDesired(rg)
@@ -9149,8 +9163,6 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 		syncSubject = syncSubjForStream()
 	}
 	sa := &streamAssignment{Group: rg, Sync: syncSubject, Created: osa.Created, Config: newCfg, Subject: subject, Reply: reply, Client: ci}
-	// FIXME(mvv): if the assignment already has a desired state but did not change here.. then we need to change the ID regardless
-
 	if err := meta.Propose(encodeUpdateStreamAssignment(sa)); err != nil {
 		return
 	}
@@ -10289,7 +10301,7 @@ func (s *Server) jsClusteredConsumerRequest(ci *ClientInfo, acc *Account, subjec
 				}
 			}
 			// Single nodes are not recorded by the NRG layer so we can rename.
-			if rBefore == 1 {
+			if len(ca.Group.Peers) == 1 && ca.Group.Desired == nil {
 				nca.Group.Name = groupNameForConsumer(newPeerSet, nca.Group.Storage)
 			}
 			nca.Group.Peers = newPeerSet
