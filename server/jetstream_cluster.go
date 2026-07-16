@@ -3401,16 +3401,17 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 	restoreDoneCh := make(<-chan error)
 
 	// For migration tracking.
-	mmtd := 300 * time.Millisecond
-	var mmt *time.Ticker
+	var mmt *time.Timer
 	var mmtc <-chan time.Time
 	var mmLeaderID string
 
 	startMigrationMonitoring := func() {
 		if mmt == nil {
-			mmt = time.NewTicker(mmtd)
+			mmt = time.NewTimer(migrateFastCheckInterval)
 			mmtc = mmt.C
 			mmLeaderID = nuid.Next()
+		} else {
+			mmt.Reset(migrateFastCheckInterval)
 		}
 	}
 
@@ -3536,6 +3537,16 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 					ne, nb = n.Applied(ce.Index)
 					ce.ReturnToPool()
 					continue
+				}
+
+				// While migrating, react quickly to peer add/remove entries.
+				if mmt != nil {
+					for _, e := range ce.Entries {
+						if e.Type == EntryAddPeer || e.Type == EntryRemovePeer {
+							startMigrationMonitoring()
+							break
+						}
+					}
 				}
 
 				// Apply our entries.
@@ -3713,6 +3724,8 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 				stopMigrationMonitoring()
 				continue
 			}
+			// Reset to the slower fallback speed.
+			mmt.Reset(migrateFallbackCheckInterval)
 			js.runStreamMigration(mset, sa, n, mmLeaderID)
 
 		case err := <-restoreDoneCh:
@@ -4901,6 +4914,15 @@ func (js *jetStream) processStreamLeaderChange(mset *stream, isLeader bool) {
 
 // Fixed value ok for now.
 const lostQuorumAdvInterval = 10 * time.Second
+
+// Migration monitoring intervals for streams and consumers. We check quickly
+// after observing a relevant change (an assignment update or a peer
+// add/remove), and otherwise poll on a slower fallback interval so blocked
+// migrations don't spam the meta leader with reconcile requests.
+const (
+	migrateFastCheckInterval     = 50 * time.Millisecond
+	migrateFallbackCheckInterval = 500 * time.Millisecond
+)
 
 // Determines if we should send lost quorum advisory. We throttle these after first one.
 func (mset *stream) shouldSendLostQuorum() bool {
@@ -6811,16 +6833,17 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 	}
 
 	// For migration tracking.
-	mmtd := 300 * time.Millisecond
-	var mmt *time.Ticker
+	var mmt *time.Timer
 	var mmtc <-chan time.Time
 	var mmLeaderID string
 
 	startMigrationMonitoring := func() {
 		if mmt == nil {
-			mmt = time.NewTicker(mmtd)
+			mmt = time.NewTimer(migrateFastCheckInterval)
 			mmtc = mmt.C
 			mmLeaderID = nuid.Next()
+		} else {
+			mmt.Reset(migrateFastCheckInterval)
 		}
 	}
 
@@ -6865,6 +6888,15 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 						doSnapshot(true)
 					}
 					continue
+				}
+				// While migrating, react quickly to peer add/remove entries.
+				if mmt != nil {
+					for _, e := range ce.Entries {
+						if e.Type == EntryAddPeer || e.Type == EntryRemovePeer {
+							startMigrationMonitoring()
+							break
+						}
+					}
 				}
 				if err := js.applyConsumerEntries(o, ce, isLeader); err == nil {
 					var ne, nb uint64
@@ -6930,6 +6962,8 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 				stopMigrationMonitoring()
 				continue
 			}
+			// Reset to the slower fallback speed.
+			mmt.Reset(migrateFallbackCheckInterval)
 			js.runConsumerMigration(ca, n, mmLeaderID)
 
 		case <-t.C:
@@ -7970,6 +8004,7 @@ func (rg *raftGroup) reconcileDesiredState(reconcile desiredAssignmentUpdate, re
 
 	// Always update the actual peers.
 	ng := rg.copyGroup()
+	prevPeers := ng.Peers
 	ng.Peers = reconcile.MetaPeers
 
 	// Compare on sorted copies, so we don't clobber the peer ordering.
@@ -7985,6 +8020,11 @@ func (rg *raftGroup) reconcileDesiredState(reconcile desiredAssignmentUpdate, re
 		ng.Preferred = _EMPTY_
 		ng.Desired = nil
 	} else {
+		// Skip if the peer set is unchanged.
+		slices.Sort(prevPeers)
+		if slices.Equal(metaPeers, prevPeers) {
+			return nil
+		}
 		// Still converging toward the desired peer set.
 		ng.Desired.ID = nuid.Next()
 	}
