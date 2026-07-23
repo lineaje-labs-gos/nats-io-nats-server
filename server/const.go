@@ -66,7 +66,7 @@ func init() {
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.12.12"
+	VERSION = "2.12.12-lineaje-01"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
